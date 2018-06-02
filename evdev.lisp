@@ -154,13 +154,35 @@ used outside of this package.")
       (116 . (:name power            :glyph nil))
       (117 . (:name kpequal          :glyph #\=))
       (118 . (:name kpplusminus      :glyph nil))
-      (119 . (:name pause            :glyph nil)))
-  :test #'equal
+      (119 . (:name pause            :glyph nil))
+      (277 . (:name btnforward      :glyph nil))
+      (278 . (:name btnback         :glyph nil)))
+   :test #'equal
   :documentation "List of key code to key symbol name and printable character.
 Used to decode the code field of the Linux input_event struct defined in
 linux/include/uapi/linux/input.h.")
 
-(define-unsigned unsigned-long-int 8)
+(define-constant +input-abs-codes+
+ '((0 . (:name ABS_X))
+   (1 . (:name ABS_Y))
+   (24 . (:name ABS_PRESSURE))
+   (40 . (:name ABS_MISC)))
+  :test #'equal
+  :documentation "Absolute device values for pointer and tablet hardware."
+)
+
+(define-constant +input-rel-codes+
+ '((8 . (:name REL_WHEEL)))
+  :test #'equal
+  :documentation "Relative motion types."
+)
+
+
+(cond ((equal (machine-type) "X86")
+       (define-unsigned unsigned-long-int 4))
+      ((equal (machine-type) "X86-64")
+       (define-unsigned unsigned-long-int 8))
+      (t 4))
 (define-unsigned unsigned-short 2)
 (define-unsigned unsigned-int 4)
 
@@ -172,7 +194,8 @@ linux/include/uapi/linux/input.h.")
    (value   :binary-type unsigned-int))
   (:documentation "This is a verbaticm copy of the input_event struct defined in
 linux/include/uapi/linux/input.h. This is used to read in each event straight
-from raw evdev data."))
+from raw evdev data. Unix time values bit widths differ on 32/64bit systems and
+based on the return value of (machine-type) in SBCL."))
 
 (defclass input-event (event)
   ((timestamp :initarg :timestamp
@@ -232,6 +255,31 @@ and the next SYNC-EVENT."))
   ()
   (:documentation "Represents a miscellaneous evdev event."))
 
+(defclass absolute-event (input-event)
+  ((value :initarg :value
+          :type integer)
+   (type  :initarg :type
+          :type (or :x :y :pressure :misc)))
+  (:documentation "An INPUT-EVENT that contains absolute position data."))
+
+(defmethod print-object ((object absolute-event) stream)
+  (print-unreadable-object (object stream :type t)
+    (with-slots (type value) object
+      (format stream ":TYPE ~a :VALUE ~a" type value))))
+
+(defclass relative-event (input-event)
+  ((value :initarg :value
+          :type integer)
+   (type  :initarg :type
+          :type (or :wheel :misc)))
+  (:documentation "An INPUT-EVENT that contains relative motion data."))
+
+(defmethod print-object ((object relative-event) stream)
+  (print-unreadable-object (object stream :type t)
+    (with-slots (type value) object
+      (format stream ":TYPE ~a :VALUE ~a " type value))))
+
+
 (defun read-raw-event (stream)
   "Reads in a single INPUT-EVENT-STRUCT from STREAM."
   (let ((*endian* :little-endian))
@@ -263,9 +311,23 @@ and the next SYNC-EVENT."))
                                 :name name
                                 :glyph glyph
                                 :state state)))
+              ((eq event-type :ev-abs)
+               (let* ((abs-code (rest (assoc code +input-abs-codes+)))
+                      (type (getf abs-code :type)))
+                 (make-instance 'absolute-event
+                                :timestamp timestamp
+                                :type abs-code
+                                :value value)))
               ((eq event-type :ev-msc)
                (make-instance 'misc-event
                               :timestamp timestamp))
+              ((eq event-type :ev-rel)
+               (let* ((abs-code (rest (assoc code +input-rel-codes+)))
+                      (type (getf abs-code :type)))
+                 (make-instance 'relative-event
+                                :timestamp timestamp
+                                :type abs-code
+                                :value value)))
               ((eq event-type :ev-syn)
                (let ((syn-code (rest (assoc code +input-syn-codes+))))
                  (make-instance 'sync-event
@@ -278,17 +340,13 @@ and the next SYNC-EVENT."))
   "Opens DEVICE-PATH for reading, reads in individual events into EVENT-VAR and
 calls BODY for each event passed in. DEVICE-PATH must exist, otherwise an error
 condition is signaled."
-  `(with-open-file (stream ,device-path
-                           :element-type '(unsigned-byte 8)
-                           :direction :io
-                           :if-does-not-exist :error
-                           :if-exists :append)
-     (loop for ,event-var = (read-event stream)
-        while ,event-var do
-          (unwind-protect ,@body))))
-
-(export '(input-event
-          keyboard-event
-          misc-event
-          read-event
-          with-evdev-device))
+  (let ((stream (gensym)))
+    `(with-open-file (,stream ,device-path
+                              :element-type '(unsigned-byte 8)
+                              :direction :io
+                              :if-does-not-exist :error
+                              :if-exists :append)
+       (loop
+         for ,event-var = (read-event ,stream)
+         while ,event-var
+         do (progn ,@body)))))
